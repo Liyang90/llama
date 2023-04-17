@@ -6,8 +6,11 @@ import torch.nn.init as init
 from torch.nn.parameter import Parameter
 # import torch_xla.core.xla_model as xm
 import torch.distributed as dist
+import torch.distributed.distributed_c10d as c10d
 
 from fairscale.nn.model_parallel.utils import divide_and_check_no_remainder, split_tensor_along_last_dim
+
+import torch.distributed._functional_collectives as fc
 
 
 def get_model_parallel_rank():
@@ -106,9 +109,10 @@ def my_reduce(input_: torch.Tensor, groups, world_size, rank) -> torch.Tensor:
         return input_
 
     # All-reduce.
-    dist.all_reduce(input_, group=groups)
+    tag, rankset, group_size = fc._expand_group(c10d._get_default_group(), "")
+    tensor = torch.ops.c10d_functional.all_reduce(input_, "sum", tag, rankset, group_size)
 
-    return input_
+    return tensor
 
 
 def my_split(input_: torch.Tensor, groups, world_size, rank) -> torch.Tensor:
@@ -136,14 +140,12 @@ def my_gather(input_: torch.Tensor, groups, world_size, rank) -> torch.Tensor:
     # Size and dimension.
     last_dim = input_.dim() - 1
 
-    tensor_list = [torch.empty_like(input_) for _ in range(world_size)]
-    tensor_list[rank] = input_
-    dist.all_gather(tensor_list, input_, group=groups)
+    tag, rankset, group_size = fc._expand_group(c10d._get_default_group(), "")
+    tensor = torch.ops.c10d_functional.all_gather_into_tensor(input_, tag, rankset, group_size)
+    if last_dim != 0:
+        tensor = torch.cat(torch.chunk(tensor, group_size, dim=0), dim=last_dim)
 
-    # Note: torch.cat already creates a contiguous tensor.
-    output = torch.cat(tensor_list, dim=last_dim).contiguous()
-
-    return output
+    return tensor
 
 
 def _initialize_affine_weight(
