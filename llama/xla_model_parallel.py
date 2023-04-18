@@ -25,6 +25,16 @@ def get_model_parallel_group():
     return None
 
 
+g_tag = None
+g_rankset = None
+g_group_size = None
+def set_g_group():
+    global g_tag
+    global g_rankset
+    global g_group_size
+    g_tag, g_rankset, g_group_size = fc._expand_group(c10d._get_default_group())
+
+
 class _CopyToModelParallelRegion(torch.autograd.Function):
     """Pass the input to the model parallel region."""
 
@@ -109,8 +119,7 @@ def my_reduce(input_: torch.Tensor, groups, world_size, rank) -> torch.Tensor:
         return input_
 
     # All-reduce.
-    tag, rankset, group_size = fc._expand_group(c10d._get_default_group(), "")
-    tensor = torch.ops.c10d_functional.all_reduce(input_, "sum", tag, rankset, group_size)
+    tensor = torch.ops.c10d_functional.all_reduce(input_, "sum", g_tag, g_rankset, g_group_size)
 
     return tensor
 
@@ -140,10 +149,9 @@ def my_gather(input_: torch.Tensor, groups, world_size, rank) -> torch.Tensor:
     # Size and dimension.
     last_dim = input_.dim() - 1
 
-    tag, rankset, group_size = fc._expand_group(c10d._get_default_group(), "")
-    tensor = torch.ops.c10d_functional.all_gather_into_tensor(input_, tag, rankset, group_size)
+    tensor = torch.ops.c10d_functional.all_gather_into_tensor(input_, g_tag, g_rankset, g_group_size)
     if last_dim != 0:
-        tensor = torch.cat(torch.chunk(tensor, group_size, dim=0), dim=last_dim)
+        tensor = torch.cat(torch.chunk(tensor, g_group_size, dim=0), dim=last_dim)
 
     return tensor
 

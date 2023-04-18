@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 from llama import ModelArgs, Transformer, Tokenizer, LLaMA
-# from llama.xla_model_parallel import get_model_parallel_rank, get_model_parallel_world_size
+from llama.xla_model_parallel import set_g_group
 
 import torch.distributed as dist
 import torch.multiprocessing as xmp
@@ -27,6 +27,7 @@ def setup_model_parallel(rank, world_size) -> Tuple[int, int]:
 
     # initialize the process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    set_g_group()
 
     # seed must be the same in all processes
     torch.manual_seed(1)
