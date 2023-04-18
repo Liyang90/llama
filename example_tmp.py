@@ -22,7 +22,7 @@ import torch.multiprocessing as xmp
 
 def setup_model_parallel(rank, world_size) -> Tuple[int, int]:
     # assuming model parallelism over the whole world size
-    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '12355'
 
     # initialize the process group
