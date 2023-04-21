@@ -21,9 +21,9 @@ from .xla_model_parallel import (
 
 @dataclass
 class ModelArgs:
-    dim: int = 4096
-    n_layers: int = 32
-    n_heads: int = 32
+    dim: int = 512
+    n_layers: int = 8
+    n_heads: int = 8
     vocab_size: int = -1  # defined later by tokenizer
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     norm_eps: float = 1e-5
@@ -82,8 +82,7 @@ class Attention(nn.Module):
         self.n_local_heads = args.n_heads // get_model_parallel_world_size()
         self.head_dim = args.dim // args.n_heads
 
-        #init_method = torch.nn.init.normal_
-        init_method = lambda x: x
+        init_method = torch.nn.init.normal_
 
         self.wq = ColumnParallelLinear(
             args.dim,
@@ -114,22 +113,15 @@ class Attention(nn.Module):
             init_method=init_method,
         )
 
-        # self.cache_k = torch.zeros(
-        #     (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
-        # )
-        # self.cache_v = torch.zeros(
-        #     (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
-        # )
-        # self.register_buffer("cache_k", torch.zeros(
-        #     (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
-        # ))
-        # self.register_buffer("cache_v", torch.zeros(
-        #     (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
-        # ))
+        self.register_buffer("cache_k", torch.zeros(
+            (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
+        ))
+        self.register_buffer("cache_v", torch.zeros(
+            (args.max_batch_size, args.max_seq_len, self.n_local_heads, self.head_dim)
+        ))
 
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], input_idexes: torch.Tensor, cache_kv):
+    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
         bsz, seqlen, _ = x.shape
-        cache_k, cache_v = cache_kv
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
@@ -141,28 +133,25 @@ class Attention(nn.Module):
         # self.cache_k = self.cache_k.to(xq)
         # self.cache_v = self.cache_v.to(xq)
 
-        # self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        # self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-        cache_k = cache_k.index_copy(1, input_idexes, xk)
-        cache_v = cache_v.index_copy(1, input_idexes, xv)
+        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
 
-        # keys = self.cache_k[:bsz, : start_pos + seqlen]
-        # values = self.cache_v[:bsz, : start_pos + seqlen]
-        keys = cache_k[:, :]
-        values = cache_v[:, :]
+        keys = self.cache_k[:bsz, : start_pos + seqlen]
+        values = self.cache_v[:bsz, : start_pos + seqlen]
 
         xq = xq.transpose(1, 2)
         keys = keys.transpose(1, 2)
         values = values.transpose(1, 2)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-        scores = scores + mask  # (bs, n_local_heads, slen, cache_len + slen)
+        if mask is not None:
+            scores = scores + mask  # (bs, n_local_heads, slen, cache_len + slen)
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
         output = torch.matmul(scores, values)  # (bs, n_local_heads, slen, head_dim)
         output = output.transpose(
             1, 2
         ).contiguous().view(bsz, seqlen, -1)
 
-        return self.wo(output), (cache_k, cache_v)
+        return self.wo(output)
 
 
 class FeedForward(nn.Module):
@@ -176,8 +165,7 @@ class FeedForward(nn.Module):
         hidden_dim = int(2 * hidden_dim / 3)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        #init_method = torch.nn.init.normal_
-        init_method = lambda x: x
+        init_method = torch.nn.init.normal_
 
         self.w1 = ColumnParallelLinear(
             dim, hidden_dim, bias=False, gather_output=False, init_method=init_method
@@ -207,11 +195,10 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], input_idexes: torch.Tensor, cache_kv):
-        h, new_cache_kv = self.attention.forward(self.attention_norm(x), freqs_cis, mask, input_idexes, cache_kv)
-        h = x + h
+    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
+        h = x + self.attention.forward(self.attention_norm(x), start_pos, freqs_cis, mask)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
-        return out, new_cache_kv
+        return out
 
 
 class Transformer(nn.Module):
@@ -221,26 +208,15 @@ class Transformer(nn.Module):
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
 
-        #init_method = torch.nn.init.normal_
-        init_method = lambda x: x
+        init_method = torch.nn.init.normal_
 
         self.tok_embeddings = ParallelEmbedding(
             params.vocab_size, params.dim, init_method=init_method
         )
 
         self.layers = torch.nn.ModuleList()
-        self.cache_kvs = []
-        n_local_heads = params.n_heads // get_model_parallel_world_size()
-        head_dim = params.dim // params.n_heads
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
-            cache_k = torch.zeros(
-                (params.max_batch_size, params.max_seq_len, n_local_heads, head_dim)
-            )
-            cache_v = torch.zeros(
-                (params.max_batch_size, params.max_seq_len, n_local_heads, head_dim)
-            )
-            self.cache_kvs.append((cache_k, cache_v))
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = ColumnParallelLinear(
@@ -252,32 +228,20 @@ class Transformer(nn.Module):
         )
         self.register_buffer("freqs_cis", freqs_cis)
 
-        mask = torch.full((1, 1, self.params.max_seq_len, self.params.max_seq_len), float("-inf")).to(torch.float)
-        mask = torch.triu(mask, diagonal=1)
-        self.register_buffer("mask", mask)
-
     @torch.no_grad()
-    def forward(self, tokens: torch.Tensor, input_idexes: torch.Tensor, output_idex: torch.Tensor, cache_kvs):
-        bsz, seqlen = tokens.shape
-        assert bsz == self.params.max_batch_size
-        # print(tokens)
+    def forward(self, tokens: torch.Tensor, start_pos: int):
+        _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         # self.freqs_cis = self.freqs_cis.to(h.device)
-        # freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
-        freqs_cis = self.freqs_cis.index_select(0, input_idexes)
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
 
-        # mask = None
-        # if seqlen > 1:
-            # mask = torch.full((1, 1, seqlen, seqlen), float("-inf"), device=tokens.device)
-            # mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
-        mask = self.mask.index_select(2, input_idexes)
+        mask = None
+        if seqlen > 1:
+            mask = torch.full((1, 1, seqlen, seqlen), float("-inf"), device=tokens.device)
+            mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
 
-        new_cache_kvs = []
-        for layer, cache_kv in zip(self.layers, cache_kvs):
-            h, new_cache_kv = layer(h, freqs_cis, mask, input_idexes, cache_kv)
-            new_cache_kvs.append(new_cache_kv)
+        for layer in self.layers:
+            h = layer(h, start_pos, freqs_cis, mask)
         h = self.norm(h)
-        h = h.index_select(1, output_idex - input_idexes[0]).squeeze(dim=1)
-        # output = self.output(h[:, -1, :])  # only compute last logits
-        output = self.output(h)
-        return output.float(), new_cache_kvs
+        output = self.output(h[:, -1, :])  # only compute last logits
+        return output.float()
