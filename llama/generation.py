@@ -14,7 +14,6 @@ class LLaMA:
     def __init__(self, model: Transformer, tokenizer: Tokenizer):
         self.model = model
         self.tokenizer = tokenizer
-        xm._init_ordinal_world_size()
 
     def generate(
         self,
@@ -27,7 +26,7 @@ class LLaMA:
         params = self.model.params
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
 
-        prompt_tokens = [self.tokenizer.encode(x, bos=False, eos=False) for x in prompts] # the hacked tokenizer don't have bos
+        prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
 
         min_prompt_size = min([len(t) for t in prompt_tokens])
         max_prompt_size = max([len(t) for t in prompt_tokens])
@@ -68,7 +67,11 @@ class LLaMA:
                 t = t[: t.index(self.tokenizer.eos_id)]
             except ValueError:
                 pass
-            decoded.append(self.tokenizer.decode(t))
+            try:
+                sentence = self.tokenizer.decode(t)
+            except IndexError:
+                sentence = self.tokenizer.decode(t[1:])
+            decoded.append(sentence)
         return decoded
 
 
