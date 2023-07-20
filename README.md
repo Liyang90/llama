@@ -1,4 +1,4 @@
-# LLaMA 
+# LLaMA
 
 This repository is intended as a minimal, hackable and readable example to load [LLaMA](https://ai.facebook.com/blog/large-language-model-llama-meta-ai/) ([arXiv](https://arxiv.org/abs/2302.13971v1)) models and run inference.
 In order to download the checkpoints and tokenizer, fill this [google form](https://forms.gle/jk851eBVbX1m5TAv5)
@@ -26,8 +26,8 @@ Download repo and install dependencies on the TPU VM:
 gcloud compute tpus tpu-vm ssh ${TPU_NAME} --project ${PROJECT} --zone ${ZONE} --worker=all --command='
 git clone --branch stable https://github.com/pytorch-tpu/llama.git
 cd llama
-pip install -r requirements.txt
-pip install -e .
+pip3 install -r requirements.txt
+pip3 install -e .
 '
 ```
 
@@ -81,6 +81,28 @@ Different models have different original_mp values:
 | 13B    | 2           |
 | 33B    | 4           |
 | 65B    | 8           |
+
+### XLA GPU
+
+`example_xla.py` can also be ran on GPUs with XLA:GPU. To do that, you need different wheels than the above such
+that you have XLA:GPU support. Please refer to [pytorch/xla](https://github.com/pytorch/xla#wheel) repo to download
+a suitable GPU nightly wheel for your environment. We use the one on 20230422.
+
+After that, you can run the following the command:
+```
+PJRT_DEVICE=GPU GPU_NUM_DEVICES=4 python3 example_xla.py --tokenizer_path $TOKENIZER_PATH --max_seq_len 256 --max_batch_size 1 --temperature 0.8 --dim 4096 --n_heads 32 --n_layers 32 --mp True
+```
+
+## CUDA
+
+`example_cuda.py` is provided to produce CUDA (using Inductor by default) results as the same format as `example_xla.py` such that one can easily compare
+results among XLA:TPU, XLA:GPU, CUDA eager, CUDA Inductor. In this case, you can just follow https://pytorch.org/ to
+download a CUDA nightly. We use the one on 20230422.
+
+Here is how you can use it:
+```
+USE_CUDA=1 python3 example_cuda.py --tokenizer_path $TOKENIZER_PATH --max_seq_len 256 --max_batch_size 1 --temperature 0.8 --dim 4096 --n_heads 32 --n_layers 32 --mp True
+```
 
 ## FAQ
 
